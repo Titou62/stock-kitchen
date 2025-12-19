@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Gestion Stocks Cuisine</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 0; background: #f6f7f9; }
+    header { background:#111827; color:white; padding:14px 18px; display:flex; gap:12px; align-items:center; }
+    header b { font-size: 16px; }
+    main { padding: 16px; max-width: 980px; margin: 0 auto; }
+    .card { background:white; border-radius:14px; padding:14px; box-shadow: 0 2px 10px rgba(0,0,0,.06); margin-bottom: 12px; }
+    .row { display:flex; gap:10px; flex-wrap:wrap; }
+    input, select, button, textarea { padding:10px; border-radius:10px; border:1px solid #d1d5db; font-size: 14px; }
+    button { background:#111827; color:white; border:none; cursor:pointer; }
+    button.secondary { background:#374151; }
+    button.danger { background:#b91c1c; }
+    table { width:100%; border-collapse:collapse; }
+    th, td { padding:10px; border-bottom:1px solid #eee; text-align:left; font-size:14px; }
+    .muted { color:#6b7280; font-size: 13px; }
+    .pill { display:inline-block; padding:4px 8px; border-radius:999px; background:#eef2ff; color:#3730a3; font-size:12px; }
+    nav a { color:#e5e7eb; text-decoration:none; margin-right:10px; font-size: 13px; }
+    nav a:hover { text-decoration:underline; }
+    .hidden { display:none; }
+  </style>
+</head>
+<body>
+  <header>
+    <b>Stocks Cuisine</b>
+    <nav id="nav" class="hidden">
+      <a href="#dashboard">Dashboard</a>
+      <a href="#products">Produits</a>
+      <a href="#requests">Demandes</a>
+      <a href="#reorder">À commander</a>
+      <a href="#qr">QR Demande</a>
+    </nav>
+    <div style="margin-left:auto" id="userbox"></div>
+  </header>
+
+  <main>
+    <div class="card" id="loginCard">
+      <h2 style="margin:0 0 8px 0">Connexion</h2>
+      <div class="row">
+        <input id="email" placeholder="Email" style="min-width:240px" />
+        <input id="password" type="password" placeholder="Mot de passe" style="min-width:240px" />
+        <button id="loginBtn">Se connecter</button>
+      </div>
+      <p class="muted" style="margin-top:10px">Astuce: crée d'abord un compte ADMIN via la commande dans le README.</p>
+      <div id="loginMsg" class="muted"></div>
+    </div>
+
+    <div class="card hidden" id="appCard">
+      <div id="view"></div>
+    </div>
+  </main>
+
+  <script src="./config.js"></script>
+  <script>
+    const API = (window.APP_CONFIG && window.APP_CONFIG.API_BASE) || "REPLACE_ME";
+    const state = {
+      token: localStorage.getItem("token") || "",
+      me: null,
+      products: [],
+      requests: [],
+      reorder: []
+    };
+
+    function qs(id){ return document.getElementById(id); }
+    function setHtml(el, html){ el.innerHTML = html; }
+    function esc(s){ return String(s).replace(/[&<>"']/g, m=>({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[m])); }
+
+    async function api(path, opts={}){
+      const headers = Object.assign({ "Content-Type":"application/json" }, opts.headers || {});
+      if (state.token) headers["Authorization"] = "Bearer " + state.token;
+      const res = await fetch(API + path, Object.assign({}, opts, { headers }));
+      const txt = await res.text();
+      let data = null;
+      try { data = JSON.parse(txt); } catch { data = { raw: txt }; }
+      if (!res.ok) throw new Error(data?.error || ("Erreur HTTP " + res.status));
+      return data;
+    }
+
+    function setLoggedInUI(){
+      qs("loginCard").classList.add("hidden");
+      qs("appCard").classList.remove("hidden");
+      qs("nav").classList.remove("hidden");
+      setHtml(qs("userbox"), '<span class="pill">'+esc(state.me.user.role)+'</span> <span class="muted">'+esc(state.me.user.email)+'</span> <button class="secondary" style="margin-left:8px" id="logoutBtn">Déconnexion</button>');
+      qs("logoutBtn").onclick = () => { localStorage.removeItem("token"); state.token=""; location.reload(); };
+    }
+
+    function setLoggedOutUI(){
+      qs("loginCard").classList.remove("hidden");
+      qs("appCard").classList.add("hidden");
+      qs("nav").classList.add("hidden");
+      setHtml(qs("userbox"), "");
+    }
+
+    async function loadMe(){
+      state.me = await api("/api/me", { method:"GET" });
+    }
+
+    async function loadProducts(q=""){
+      const data = await api("/api/products" + (q ? ("?q="+encodeURIComponent(q)) : ""), { method:"GET" });
+      state.products = data.products || [];
+    }
+
+    async function loadRequests(status=""){
+      const data = await api("/api/requests" + (status ? ("?status="+encodeURIComponent(status)) : ""), { method:"GET" });
+      state.requests = data.requests || [];
+    }
+
+    async function loadReorder(){
+      const data = await api("/api/reorder", { method:"GET" });
+      state.reorder = data.reorder || [];
+    }
+
+    function route(){
+      const hash = location.hash.replace("#","") || "dashboard";
+      if (hash === "dashboard") return renderDashboard();
+      if (hash === "products") return renderProducts();
+      if (hash === "requests") return renderRequests();
+      if (hash === "reorder") return renderReorder();
+      if (hash === "qr") return renderQr();
+      return renderDashboard();
+    }
+
+    function renderDashboard(){
+      setHtml(qs("view"), `
+        <h2 style="margin:0 0 10px 0">Dashboard</h2>
+        <div class="row">
+          <div class="card" style="flex:1; min-width:260px">
+            <b>Stocks critiques</b>
+            <div class="muted">Produits sous minimum (voir “À commander”)</div>
+            <button id="goReorder" style="margin-top:10px">Voir la liste</button>
+          </div>
+          <div class="card" style="flex:1; min-width:260px">
+            <b>Demandes</b>
+            <div class="muted">Voir les demandes en attente</div>
+            <button id="goReq" style="margin-top:10px">Demandes</button>
+          </div>
+        </div>
+      `);
+      qs("goReorder").onclick = ()=> location.hash="#reorder";
+      qs("goReq").onclick = ()=> location.hash="#requests";
+    }
+
+    function renderProducts(){
+      const rows = state.products.map(p => `
+        <tr>
+          <td>${esc(p.name)}</td>
+          <td class="muted">${esc(p.category||"")}</td>
+          <td>${esc(p.unit)}</td>
+          <td><b>${esc(p.stock_current)}</b></td>
+          <td class="muted">${esc(p.stock_min)}</td>
+          <td class="muted">${esc(p.location||"")}</td>
+        </tr>
+      `).join("");
+
+      setHtml(qs("view"), `
+        <h2 style="margin:0 0 10px 0">Produits</h2>
+
+        <div class="row" style="margin-bottom:10px">
+          <input id="searchProd" placeholder="Rechercher un produit..." style="min-width:260px" />
+          <button id="refreshProd">Recharger</button>
+        </div>
+
+        <div class="card">
+          <b>Ajouter un produit</b>
+          <div class="row" style="margin-top:10px">
+            <input id="pName" placeholder="Nom" style="min-width:220px" />
+            <input id="pCat" placeholder="Catégorie" style="min-width:180px" />
+            <input id="pUnit" placeholder="Unité (pcs, L...)" style="min-width:160px" />
+            <input id="pMin" type="number" step="0.1" placeholder="Stock min" style="min-width:120px" />
+            <input id="pLoc" placeholder="Emplacement" style="min-width:180px" />
+            <button id="addProd">Ajouter</button>
+          </div>
+          <div class="muted" id="prodMsg" style="margin-top:8px"></div>
+        </div>
+
+        <div class="card">
+          <b>Entrée / sortie rapide</b>
+          <div class="row" style="margin-top:10px">
+            <select id="movProd" style="min-width:260px">
+              ${state.products.map(p=>`<option value="${p.id}">${esc(p.name)} (stock: ${esc(p.stock_current)})</option>`).join("")}
+            </select>
+            <input id="movQty" type="number" step="0.1" placeholder="Quantité" style="min-width:120px" />
+            <input id="movReason" placeholder="Raison (optionnel)" style="min-width:220px" />
+            <button id="btnIn">Entrée</button>
+            <button id="btnOut" class="secondary">Sortie</button>
+          </div>
+          <div class="muted" id="movMsg" style="margin-top:8px"></div>
+        </div>
+
+        <div class="card">
+          <b>Liste</b>
+          <table>
+            <thead><tr><th>Nom</th><th>Cat.</th><th>Unité</th><th>Stock</th><th>Min</th><th>Emplacement</th></tr></thead>
+            <tbody>${rows || `<tr><td colspan="6" class="muted">Aucun produit</td></tr>`}</tbody>
+          </table>
+        </div>
+      `);
+
+      qs("refreshProd").onclick = async ()=> { await loadProducts(qs("searchProd").value.trim()); route(); };
+      qs("searchProd").oninput = async (e)=> { await loadProducts(e.target.value.trim()); route(); };
+
+      qs("addProd").onclick = async ()=>{
+        try{
+          const payload = {
+            name: qs("pName").value,
+            category: qs("pCat").value,
+            unit: qs("pUnit").value || "pcs",
+            stock_min: Number(qs("pMin").value || 0),
+            location: qs("pLoc").value
+          };
+          await api("/api/products", { method:"POST", body: JSON.stringify(payload) });
+          setHtml(qs("prodMsg"), "✅ Produit ajouté");
+          await loadProducts();
+          route();
+        }catch(err){ setHtml(qs("prodMsg"), "❌ " + esc(err.message)); }
+      };
+
+      qs("btnIn").onclick = async ()=> doMove("in");
+      qs("btnOut").onclick = async ()=> doMove("out");
+
+      async function doMove(kind){
+        try{
+          const payload = {
+            product_id: Number(qs("movProd").value),
+            qty: Number(qs("movQty").value),
+            reason: qs("movReason").value
+          };
+          await api("/api/stock/"+kind, { method:"POST", body: JSON.stringify(payload) });
+          setHtml(qs("movMsg"), "✅ Mouvement enregistré");
+          await loadProducts();
+          route();
+        }catch(err){ setHtml(qs("movMsg"), "❌ " + esc(err.message)); }
+      }
+    }
+
+    function renderRequests(){
+      const rows = state.requests.map(r => `
+        <tr>
+          <td>#${esc(r.id)}</td>
+          <td><span class="pill">${esc(r.status)}</span></td>
+          <td class="muted">${esc(r.note||"")}</td>
+          <td class="muted">${esc(r.created_at)}</td>
+          <td><button class="secondary" data-id="${r.id}">Servir</button></td>
+        </tr>
+      `).join("");
+
+      setHtml(qs("view"), `
+        <h2 style="margin:0 0 10px 0">Demandes</h2>
+        <div class="row" style="margin-bottom:10px">
+          <button id="loadPending">En attente</button>
+          <button id="loadAll" class="secondary">Toutes</button>
+        </div>
+
+        <div class="card">
+          <b>Créer une demande (pour test)</b>
+          <div class="row" style="margin-top:10px">
+            <select id="reqProd" style="min-width:260px">
+              ${state.products.map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join("")}
+            </select>
+            <input id="reqQty" type="number" step="0.1" placeholder="Qté" style="min-width:120px" />
+            <input id="reqNote" placeholder="Note (optionnel)" style="min-width:260px" />
+            <button id="createReq">Créer</button>
+          </div>
+          <div class="muted" id="reqMsg" style="margin-top:8px"></div>
+          <div class="muted" style="margin-top:8px">Pour le flux réel “Garde cuisine”, utilise la page QR (menu QR Demande).</div>
+        </div>
+
+        <div class="card">
+          <b>Liste</b>
+          <table>
+            <thead><tr><th>ID</th><th>Statut</th><th>Note</th><th>Créée</th><th>Action</th></tr></thead>
+            <tbody>${rows || `<tr><td colspan="5" class="muted">Aucune demande</td></tr>`}</tbody>
+          </table>
+          <div class="muted" style="margin-top:8px">Note: Ce MVP “serve” directement (il sort le stock). L'écran d'“approbation détaillée” peut être ajouté ensuite.</div>
+        </div>
+      `);
+
+      qs("loadPending").onclick = async()=> { await loadRequests("PENDING"); route(); };
+      qs("loadAll").onclick = async()=> { await loadRequests(""); route(); };
+
+      qs("createReq").onclick = async ()=>{
+        try{
+          const payload = {
+            note: qs("reqNote").value,
+            items: [{ product_id: Number(qs("reqProd").value), qty_requested: Number(qs("reqQty").value) }]
+          };
+          await api("/api/requests", { method:"POST", body: JSON.stringify(payload) });
+          setHtml(qs("reqMsg"), "✅ Demande créée");
+          await loadRequests("PENDING");
+          route();
+        }catch(err){ setHtml(qs("reqMsg"), "❌ " + esc(err.message)); }
+      };
+
+      document.querySelectorAll("button[data-id]").forEach(btn=>{
+        btn.onclick = async ()=>{
+          const id = btn.getAttribute("data-id");
+          try{
+            await api("/api/requests/"+id+"/serve", { method:"POST" });
+            await loadRequests("PENDING");
+            await loadProducts();
+            route();
+          }catch(err){ alert("Erreur: " + err.message); }
+        };
+      });
+    }
+
+    function renderReorder(){
+      const rows = state.reorder.map(p => `
+        <tr>
+          <td>${esc(p.name)}</td>
+          <td>${esc(p.unit)}</td>
+          <td><b>${esc(p.stock_current)}</b></td>
+          <td class="muted">${esc(p.stock_min)}</td>
+          <td><b>${esc(Math.max(0, p.suggested_qty))}</b></td>
+        </tr>
+      `).join("");
+
+      setHtml(qs("view"), `
+        <h2 style="margin:0 0 10px 0">À commander</h2>
+        <div class="card">
+          <div class="row" style="justify-content:space-between; align-items:center">
+            <div>
+              <b>Produits sous minimum</b>
+              <div class="muted">Quantité suggérée = (min*2 - stock)</div>
+            </div>
+            <button id="reloadReorder">Recharger</button>
+          </div>
+          <table style="margin-top:10px">
+            <thead><tr><th>Produit</th><th>Unité</th><th>Stock</th><th>Min</th><th>À commander</th></tr></thead>
+            <tbody>${rows || `<tr><td colspan="5" class="muted">Aucun produit sous minimum</td></tr>`}</tbody>
+          </table>
+        </div>
+      `);
+      qs("reloadReorder").onclick = async()=> { await loadReorder(); route(); };
+    }
+
+    function renderQr(){
+      setHtml(qs("view"), `
+        <h2 style="margin:0 0 10px 0">QR Demande (Garde cuisine)</h2>
+        <div class="card">
+          <b>Créer un token QR</b>
+          <p class="muted">Pour ce MVP, la création du token se fait via la base D1 (commande dans README). Ensuite, tu mets le token ci-dessous pour obtenir l'URL à convertir en QR code.</p>
+          <div class="row">
+            <input id="qrToken" placeholder="Colle ici le token (ex: abcd...)" style="min-width:320px" />
+            <button id="makeQrUrl">Générer l'URL</button>
+          </div>
+          <div class="card" style="margin-top:10px">
+            <div class="muted">URL à mettre dans le QR code :</div>
+            <div id="qrUrl" style="word-break:break-all"></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <b>Page demande rapide (mobile)</b>
+          <p class="muted">Tu peux ouvrir: <code>/qr.html?token=TON_TOKEN</code></p>
+          <a href="./qr.html" target="_blank">Ouvrir qr.html</a>
+        </div>
+      `);
+
+      qs("makeQrUrl").onclick = ()=>{
+        const t = qs("qrToken").value.trim();
+        const url = location.origin + "/qr.html?token=" + encodeURIComponent(t);
+        setHtml(qs("qrUrl"), "<b>"+esc(url)+"</b>");
+      };
+    }
+
+    async function boot(){
+      if (!state.token) { setLoggedOutUI(); return; }
+      try{
+        await loadMe();
+        setLoggedInUI();
+        await loadProducts();
+        await loadRequests("PENDING");
+        try{ await loadReorder(); }catch(e){}
+        route();
+      }catch(e){
+        localStorage.removeItem("token");
+        state.token = "";
+        setLoggedOutUI();
+      }
+    }
+
+    qs("loginBtn").onclick = async ()=>{
+      try{
+        setHtml(qs("loginMsg"), "Connexion...");
+        const data = await api("/api/auth/login", { method:"POST", body: JSON.stringify({ email: qs("email").value, password: qs("password").value }) });
+        state.token = data.token;
+        localStorage.setItem("token", state.token);
+        await boot();
+      }catch(e){
+        setHtml(qs("loginMsg"), "❌ " + esc(e.message) + "<br><span class='muted'>Vérifie API_BASE dans web/config.js et que l'admin existe.</span>");
+      }
+    };
+
+    window.addEventListener("hashchange", route);
+    boot();
+  </script>
+</body>
+</html>

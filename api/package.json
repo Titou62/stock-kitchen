@@ -1,0 +1,13 @@
+{
+  "name": "stock-kitchen-api",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "migrate:local": "wrangler d1 migrations apply stock-kitchen-db --local",
+    "migrate:remote": "wrangler d1 migrations apply stock-kitchen-db --remote"
+  },
+  "dependencies": {}
+}

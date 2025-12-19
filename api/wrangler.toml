@@ -1,0 +1,14 @@
+name = "stock-kitchen-api"
+main = "src/index.ts"
+compatibility_date = "2025-12-18"
+
+# Après avoir créé ta base D1, remplis database_id ci-dessous.
+[[d1_databases]]
+binding = "DB"
+database_name = "stock-kitchen-db"
+database_id = "a05f06bf-246e-4774-a51e-72adc7dff832"
+
+
+[vars]
+# URL du site Pages autorisée en CORS (à remplir après déploiement)
+WEB_ORIGIN = "REPLACE_ME"

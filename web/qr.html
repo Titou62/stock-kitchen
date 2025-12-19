@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Demande rapide</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 0; background: #f6f7f9; }
+    main { padding: 16px; max-width: 720px; margin: 0 auto; }
+    .card { background:white; border-radius:14px; padding:14px; box-shadow: 0 2px 10px rgba(0,0,0,.06); margin-bottom: 12px; }
+    .row { display:flex; gap:10px; flex-wrap:wrap; }
+    input, select, button, textarea { padding:10px; border-radius:10px; border:1px solid #d1d5db; font-size: 14px; }
+    button { background:#111827; color:white; border:none; cursor:pointer; }
+    .muted { color:#6b7280; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="card">
+      <h2 style="margin:0 0 6px 0">Demande rapide (Garde cuisine)</h2>
+      <div class="muted">Scanné via QR code • Envoie une demande au stock</div>
+    </div>
+
+    <div class="card">
+      <b>Créer une demande</b>
+      <div class="row" style="margin-top:10px">
+        <select id="prod" style="min-width:260px"></select>
+        <input id="qty" type="number" step="0.1" placeholder="Quantité" style="min-width:120px" />
+      </div>
+      <textarea id="note" placeholder="Note (optionnel)" style="width:100%; margin-top:10px; min-height:80px"></textarea>
+      <div class="row" style="margin-top:10px">
+        <button id="send">Envoyer</button>
+      </div>
+      <div id="msg" class="muted" style="margin-top:8px"></div>
+    </div>
+  </main>
+
+  <script src="./config.js"></script>
+  <script>
+    const API = (window.APP_CONFIG && window.APP_CONFIG.API_BASE) || "REPLACE_ME";
+    const params = new URLSearchParams(location.search);
+    const token = params.get("token") || "";
+    const msg = document.getElementById("msg");
+
+    function esc(s){ return String(s).replace(/[&<>"']/g, m=>({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[m])); }
+
+    async function api(path, opts={}){
+      const headers = Object.assign({ "Content-Type":"application/json" }, opts.headers || {});
+      const res = await fetch(API + path, Object.assign({}, opts, { headers }));
+      const txt = await res.text();
+      let data = null;
+      try { data = JSON.parse(txt); } catch { data = { raw: txt }; }
+      if (!res.ok) throw new Error(data?.error || ("Erreur HTTP " + res.status));
+      return data;
+    }
+
+    async function loadProducts(){
+      const data = await api("/api/products", { method:"GET" }); // open to auth in API; for MVP we keep auth required on API. So this page will fail if API blocks.
+      return data.products || [];
+    }
+
+    async function boot(){
+      if (!token){
+        msg.innerHTML = "❌ Token manquant. Le QR doit contenir ?token=XXXX";
+        document.getElementById("send").disabled = true;
+        return;
+      }
+      // For simplicity, we don't list products here in this MVP without public endpoint.
+      msg.innerHTML = "ℹ️ Dans ce MVP, la page QR envoie une demande via token, mais la liste des produits est gérée côté staff connecté. Tu peux améliorer ensuite.";
+      document.getElementById("prod").innerHTML = '<option value="">(Produit ID)</option>';
+    }
+
+    document.getElementById("send").onclick = async ()=>{
+      try{
+        const pid = Number(document.getElementById("prod").value || 0);
+        const qty = Number(document.getElementById("qty").value || 0);
+        if (!pid || qty <= 0) { msg.innerHTML = "❌ Mets un product_id et une quantité > 0"; return; }
+        const payload = { qr_token: token, note: document.getElementById("note").value, items: [{ product_id: pid, qty_requested: qty }] };
+        await api("/api/requests", { method:"POST", body: JSON.stringify(payload) });
+        msg.innerHTML = "✅ Demande envoyée";
+      }catch(e){ msg.innerHTML = "❌ " + esc(e.message); }
+    };
+
+    boot();
+  </script>
+</body>
+</html>
