@@ -27,16 +27,12 @@ function bad(msg: string, env: Env, status = 400) {
 /** --- util: password hashing (PBKDF2) --- */
 async function pbkdf2Hash(password: string, saltB64: string) {
   const enc = new TextEncoder();
-  const salt = Uint8Array.from(atob(saltB64), c => c.charCodeAt(0));
+  const salt = Uint8Array.from(atob(saltB64), (c) => c.charCodeAt(0));
   const key = await crypto.subtle.importKey("raw", enc.encode(password), { name: "PBKDF2" }, false, ["deriveBits"]);
-  const bits = await crypto.subtle.deriveBits(
-    { name: "PBKDF2", salt, iterations: 120000, hash: "SHA-256" },
-    key,
-    256
-  );
+  const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", salt, iterations: 100000, hash: "SHA-256" }, key, 256);
   const out = new Uint8Array(bits);
   let s = "";
-  out.forEach(b => (s += String.fromCharCode(b)));
+  out.forEach((b) => (s += String.fromCharCode(b)));
   return btoa(s);
 }
 
@@ -53,7 +49,7 @@ function base64url(input: string) {
 }
 function base64urlBytes(bytes: Uint8Array) {
   let s = "";
-  bytes.forEach(b => (s += String.fromCharCode(b)));
+  bytes.forEach((b) => (s += String.fromCharCode(b)));
   return btoa(s).replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
 }
 function decodeBase64urlToString(b64url: string) {
@@ -85,7 +81,6 @@ async function verifyJwt(token: string, env: Env) {
   const expected = base64urlBytes(sig);
   if (!timingSafeEqual(expected, s)) return null;
   const payload = JSON.parse(decodeBase64urlToString(p));
-  // exp check (optional)
   if (typeof payload.exp === "number" && Date.now() / 1000 > payload.exp) return null;
   return payload;
 }
@@ -106,6 +101,21 @@ async function requireAuth(req: Request, env: Env) {
   return { userId: payload.sub, role: payload.role as Role };
 }
 
+/** --- Adelya import helper (simple OG/meta parsing) --- */
+function pickMeta(html: string, property: string) {
+  // matches: <meta property="og:image" content="...">
+  const re = new RegExp(`<meta\\s+[^>]*property=["']${property}["'][^>]*content=["']([^"']+)["'][^>]*>`, "i");
+  const m = html.match(re);
+  return m ? m[1] : "";
+}
+function pickTitle(html: string) {
+  const m = html.match(/<title>([^<]+)<\/title>/i);
+  return m ? m[1].trim() : "";
+}
+function cleanName(name: string) {
+  return name.replace(/\s*\|\s*Boutique.*$/i, "").trim();
+}
+
 /** --- Routing --- */
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
@@ -119,20 +129,28 @@ export default {
 
     // Login
     if (path === "/api/auth/login" && req.method === "POST") {
-      const body = await req.json().catch(() => null) as any;
+      const body = (await req.json().catch(() => null)) as any;
       if (!body?.email || !body?.password) return bad("email et password requis", env);
+
       const row = await env.DB.prepare(
         "SELECT id, email, role, password_hash_b64, salt_b64, active FROM users WHERE email = ?"
-      ).bind(body.email).first<any>();
+      )
+        .bind(body.email)
+        .first<any>();
+
       if (!row || row.active !== 1) return bad("identifiants invalides", env, 401);
+
       const computed = await pbkdf2Hash(String(body.password), String(row.salt_b64));
       if (!timingSafeEqual(computed, String(row.password_hash_b64))) return bad("identifiants invalides", env, 401);
 
-      const token = await signJwt({
-        sub: String(row.id),
-        role: String(row.role),
-        exp: Math.floor(Date.now()/1000) + 60*60*12 // 12h
-      }, env);
+      const token = await signJwt(
+        {
+          sub: String(row.id),
+          role: String(row.role),
+          exp: Math.floor(Date.now() / 1000) + 60 * 60 * 12, // 12h
+        },
+        env
+      );
 
       return json({ token, role: row.role, email: row.email }, env);
     }
@@ -141,18 +159,67 @@ export default {
     if (path === "/api/me" && req.method === "GET") {
       const auth = await requireAuth(req, env);
       if (!auth) return bad("non authentifié", env, 401);
-      const u = await env.DB.prepare("SELECT id, name, email, role FROM users WHERE id = ?").bind(auth.userId).first();
+
+      const u = await env.DB.prepare("SELECT id, name, email, role FROM users WHERE id = ?")
+        .bind(auth.userId)
+        .first();
       return json({ user: u }, env);
+    }
+
+    // Import from Adelya (ADMIN + PERM_ORD)
+    // GET /api/adelya/import?url=https://shop.ath.adelya.net/produit/xxx
+    if (path === "/api/adelya/import" && req.method === "GET") {
+      const auth = await requireAuth(req, env);
+      if (!auth) return bad("non authentifié", env, 401);
+      if (!hasAnyRole(auth.role, ["ADMIN", "PERM_ORD"])) return bad("interdit", env, 403);
+
+      const target = url.searchParams.get("url") || "";
+      if (!target.startsWith("http")) return bad("url invalide", env);
+
+      const r = await fetch(target, {
+        headers: {
+          "User-Agent": "stock-kitchen-bot/1.0",
+          Accept: "text/html,*/*",
+        },
+      });
+
+      if (!r.ok) return bad("Impossible de charger la page fournisseur", env, 400);
+
+      const html = await r.text();
+
+      const ogTitle = pickMeta(html, "og:title");
+      const ogImage = pickMeta(html, "og:image");
+      const title = cleanName(ogTitle || pickTitle(html) || "");
+
+      // best effort category: often in <meta property="product:category" ...>
+      const cat = pickMeta(html, "product:category");
+
+      return json(
+        {
+          name: title,
+          category: cat || "",
+          unit: "pcs",
+          image_url: ogImage || "",
+          supplier_url: target,
+        },
+        env
+      );
     }
 
     // Products list
     if (path === "/api/products" && req.method === "GET") {
       const auth = await requireAuth(req, env);
       if (!auth) return bad("non authentifié", env, 401);
+
       const q = url.searchParams.get("q")?.trim() || "";
       const stmt = q
-        ? env.DB.prepare("SELECT * FROM products WHERE active = 1 AND name LIKE ? ORDER BY name").bind(`%${q}%`)
-        : env.DB.prepare("SELECT * FROM products WHERE active = 1 ORDER BY name");
+        ? env.DB.prepare(
+            "SELECT id,name,category,unit,stock_current,stock_min,location,image_url,supplier_url,active,created_at FROM products WHERE active = 1 AND name LIKE ? ORDER BY name"
+          ).bind(`%${q}%`)
+        : env.DB.prepare(
+            "SELECT id,name,category,unit,stock_current,stock_min,location,image_url,supplier_url,active,created_at FROM products WHERE active = 1 ORDER BY name"
+          );
+
       const rows = await stmt.all();
       return json({ products: rows.results }, env);
     }
@@ -163,19 +230,40 @@ export default {
       if (!auth) return bad("non authentifié", env, 401);
       if (!hasAnyRole(auth.role, ["ADMIN", "PERM_ORD"])) return bad("interdit", env, 403);
 
-      const body = await req.json().catch(() => null) as any;
+      const body = (await req.json().catch(() => null)) as any;
+
       const name = String(body?.name || "").trim();
       if (!name) return bad("name requis", env);
+
       const category = String(body?.category || "").trim();
       const unit = String(body?.unit || "pcs").trim();
       const stockMin = Number(body?.stock_min ?? 0);
       const location = String(body?.location || "").trim();
 
+      const imageUrl = String(body?.image_url || "").trim();
+      const supplierUrl = String(body?.supplier_url || "").trim();
+
       const res = await env.DB.prepare(
-        "INSERT INTO products (name, category, unit, stock_current, stock_min, location, active, created_at) VALUES (?,?,?,?,?,?,1,datetime('now'))"
-      ).bind(name, category, unit, 0, stockMin, location).run();
+        "INSERT INTO products (name, category, unit, stock_current, stock_min, location, image_url, supplier_url, active, created_at) VALUES (?,?,?,?,?,?,?,?,1,datetime('now'))"
+      )
+        .bind(name, category, unit, 0, stockMin, location, imageUrl || null, supplierUrl || null)
+        .run();
 
       return json({ ok: true, id: res.meta.last_row_id }, env, 201);
+    }
+
+    // Soft delete product (ADMIN only) => active=0
+    const delMatch = path.match(/^\/api\/products\/(\d+)$/);
+    if (delMatch && req.method === "DELETE") {
+      const auth = await requireAuth(req, env);
+      if (!auth) return bad("non authentifié", env, 401);
+      if (!hasAnyRole(auth.role, ["ADMIN"])) return bad("interdit", env, 403);
+
+      const id = Number(delMatch[1]);
+      if (!id) return bad("id invalide", env);
+
+      await env.DB.prepare("UPDATE products SET active=0 WHERE id=?").bind(id).run();
+      return json({ ok: true }, env);
     }
 
     // Stock movement IN/OUT (ADMIN, PERM_ORD)
@@ -184,78 +272,29 @@ export default {
       if (!auth) return bad("non authentifié", env, 401);
       if (!hasAnyRole(auth.role, ["ADMIN", "PERM_ORD"])) return bad("interdit", env, 403);
 
-      const body = await req.json().catch(() => null) as any;
+      const body = (await req.json().catch(() => null)) as any;
       const productId = Number(body?.product_id);
       const qty = Number(body?.qty);
       if (!productId || !Number.isFinite(qty) || qty <= 0) return bad("product_id et qty > 0 requis", env);
+
       const reason = String(body?.reason || (path.endsWith("/in") ? "IN" : "OUT")).trim();
       const type = path.endsWith("/in") ? "IN" : "OUT";
 
-      // transaction
       await env.DB.batch([
-        env.DB.prepare("INSERT INTO stock_movements (product_id,type,qty,reason,user_id,request_id,created_at) VALUES (?,?,?,?,?,NULL,datetime('now'))")
-          .bind(productId, type, qty, reason, auth.userId),
-        env.DB.prepare(type === "IN"
-          ? "UPDATE products SET stock_current = stock_current + ? WHERE id = ?"
-          : "UPDATE products SET stock_current = MAX(stock_current - ?, 0) WHERE id = ?"
-        ).bind(qty, productId)
+        env.DB.prepare(
+          "INSERT INTO stock_movements (product_id,type,qty,reason,user_id,request_id,created_at) VALUES (?,?,?,?,?,NULL,datetime('now'))"
+        ).bind(productId, type, qty, reason, auth.userId),
+        env.DB.prepare(
+          type === "IN"
+            ? "UPDATE products SET stock_current = stock_current + ? WHERE id = ?"
+            : "UPDATE products SET stock_current = MAX(stock_current - ?, 0) WHERE id = ?"
+        ).bind(qty, productId),
       ]);
 
       return json({ ok: true }, env);
     }
 
-    // Create request (QR token OR authenticated)
-    if (path === "/api/requests" && req.method === "POST") {
-      const body = await req.json().catch(() => null) as any;
-
-      // allow QR token without auth
-      const qrToken = String(body?.qr_token || "").trim();
-      let createdByUserId: string | null = null;
-      let createdByQrId: number | null = null;
-
-      if (qrToken) {
-        const tok = await env.DB.prepare("SELECT id, active, expires_at FROM qr_tokens WHERE token = ?")
-          .bind(qrToken).first<any>();
-        if (!tok || tok.active !== 1) return bad("QR token invalide", env, 401);
-        if (tok.expires_at && String(tok.expires_at).length > 0) {
-          // SQLite datetime compare
-          const chk = await env.DB.prepare("SELECT CASE WHEN datetime(?) > datetime('now') THEN 1 ELSE 0 END AS ok")
-            .bind(String(tok.expires_at)).first<any>();
-          if (chk?.ok !== 1) return bad("QR token expiré", env, 401);
-        }
-        createdByQrId = Number(tok.id);
-      } else {
-        const auth = await requireAuth(req, env);
-        if (!auth) return bad("non authentifié", env, 401);
-        createdByUserId = auth.userId;
-      }
-
-      const note = String(body?.note || "").trim();
-      const items = Array.isArray(body?.items) ? body.items : [];
-      if (items.length === 0) return bad("items requis", env);
-
-      // insert request + items
-      const r = await env.DB.prepare(
-        "INSERT INTO requests (created_by_user_id, created_by_qr_token_id, status, note, created_at) VALUES (?,?, 'PENDING', ?, datetime('now'))"
-      ).bind(createdByUserId, createdByQrId, note).run();
-      const requestId = Number(r.meta.last_row_id);
-
-      const stmts: D1PreparedStatement[] = [];
-      for (const it of items) {
-        const pid = Number(it.product_id);
-        const q = Number(it.qty_requested);
-        if (!pid || !Number.isFinite(q) || q <= 0) continue;
-        stmts.push(env.DB.prepare(
-          "INSERT INTO request_items (request_id, product_id, qty_requested, qty_approved) VALUES (?,?,?,NULL)"
-        ).bind(requestId, pid, q));
-      }
-      if (stmts.length === 0) return bad("items invalides", env);
-      await env.DB.batch(stmts);
-
-      return json({ ok: true, request_id: requestId }, env, 201);
-    }
-
-    // List requests (auth required)
+    // Requests list (auth required)
     if (path === "/api/requests" && req.method === "GET") {
       const auth = await requireAuth(req, env);
       if (!auth) return bad("non authentifié", env, 401);
@@ -269,38 +308,64 @@ export default {
       return json({ requests: reqs.results }, env);
     }
 
-    // Approve request (ADMIN, PERM_ORD, PERM_CUI, GRADE_RHL)
-    const approveMatch = path.match(/^\/api\/requests\/(\d+)\/approve$/);
-    if (approveMatch && req.method === "POST") {
-      const auth = await requireAuth(req, env);
-      if (!auth) return bad("non authentifié", env, 401);
-      if (!hasAnyRole(auth.role, ["ADMIN", "PERM_ORD", "PERM_CUI", "GRADE_RHL"])) return bad("interdit", env, 403);
+    // Create request (QR token OR authenticated)
+    if (path === "/api/requests" && req.method === "POST") {
+      const body = (await req.json().catch(() => null)) as any;
 
-      const requestId = Number(approveMatch[1]);
-      const body = await req.json().catch(() => null) as any;
+      const qrToken = String(body?.qr_token || "").trim();
+      let createdByUserId: string | null = null;
+      let createdByQrId: number | null = null;
+
+      if (qrToken) {
+        const tok = await env.DB.prepare("SELECT id, active, expires_at FROM qr_tokens WHERE token = ?")
+          .bind(qrToken)
+          .first<any>();
+        if (!tok || tok.active !== 1) return bad("QR token invalide", env, 401);
+
+        if (tok.expires_at && String(tok.expires_at).length > 0) {
+          const chk = await env.DB.prepare("SELECT CASE WHEN datetime(?) > datetime('now') THEN 1 ELSE 0 END AS ok")
+            .bind(String(tok.expires_at))
+            .first<any>();
+          if (chk?.ok !== 1) return bad("QR token expiré", env, 401);
+        }
+        createdByQrId = Number(tok.id);
+      } else {
+        const auth = await requireAuth(req, env);
+        if (!auth) return bad("non authentifié", env, 401);
+        createdByUserId = auth.userId;
+      }
+
+      const note = String(body?.note || "").trim();
       const items = Array.isArray(body?.items) ? body.items : [];
       if (items.length === 0) return bad("items requis", env);
 
-      // set approved quantities
+      const r = await env.DB.prepare(
+        "INSERT INTO requests (created_by_user_id, created_by_qr_token_id, status, note, created_at) VALUES (?,?, 'PENDING', ?, datetime('now'))"
+      )
+        .bind(createdByUserId, createdByQrId, note)
+        .run();
+      const requestId = Number(r.meta.last_row_id);
+
       const stmts: D1PreparedStatement[] = [];
       for (const it of items) {
-        const itemId = Number(it.item_id);
-        const q = Number(it.qty_approved);
-        if (!itemId || !Number.isFinite(q) || q < 0) continue;
-        stmts.push(env.DB.prepare("UPDATE request_items SET qty_approved = ? WHERE id = ? AND request_id = ?")
-          .bind(q, itemId, requestId));
+        const pid = Number(it.product_id);
+        const q = Number(it.qty_requested);
+        if (!pid || !Number.isFinite(q) || q <= 0) continue;
+        stmts.push(
+          env.DB.prepare("INSERT INTO request_items (request_id, product_id, qty_requested, qty_approved) VALUES (?,?,?,NULL)").bind(
+            requestId,
+            pid,
+            q
+          )
+        );
       }
       if (stmts.length === 0) return bad("items invalides", env);
-
-      stmts.push(env.DB.prepare(
-        "UPDATE requests SET status='APPROVED', validated_by=?, validated_at=datetime('now') WHERE id=?"
-      ).bind(auth.userId, requestId));
-
       await env.DB.batch(stmts);
-      return json({ ok: true }, env);
+
+      return json({ ok: true, request_id: requestId }, env, 201);
     }
 
-    // Serve request (ADMIN, PERM_ORD, PERM_CUI, GRADE_RHL) -> decrements stock + movements
+    // Serve request -> decrements stock
     const serveMatch = path.match(/^\/api\/requests\/(\d+)\/serve$/);
     if (serveMatch && req.method === "POST") {
       const auth = await requireAuth(req, env);
@@ -308,21 +373,21 @@ export default {
       if (!hasAnyRole(auth.role, ["ADMIN", "PERM_ORD", "PERM_CUI", "GRADE_RHL"])) return bad("interdit", env, 403);
 
       const requestId = Number(serveMatch[1]);
-
-      const items = await env.DB.prepare(
-        "SELECT id, product_id, qty_approved FROM request_items WHERE request_id = ?"
-      ).bind(requestId).all<any>();
+      const items = await env.DB.prepare("SELECT id, product_id, qty_approved FROM request_items WHERE request_id = ?")
+        .bind(requestId)
+        .all<any>();
 
       const stmts: D1PreparedStatement[] = [];
       for (const it of items.results) {
         const qty = Number(it.qty_approved ?? 0);
         if (!qty || qty <= 0) continue;
-        stmts.push(env.DB.prepare(
-          "INSERT INTO stock_movements (product_id,type,qty,reason,user_id,request_id,created_at) VALUES (?,?,?,?,?,?,datetime('now'))"
-        ).bind(it.product_id, "OUT", qty, "REQUEST_SERVE", auth.userId, requestId));
-        stmts.push(env.DB.prepare(
-          "UPDATE products SET stock_current = MAX(stock_current - ?, 0) WHERE id = ?"
-        ).bind(qty, it.product_id));
+
+        stmts.push(
+          env.DB.prepare(
+            "INSERT INTO stock_movements (product_id,type,qty,reason,user_id,request_id,created_at) VALUES (?,?,?,?,?,?,datetime('now'))"
+          ).bind(it.product_id, "OUT", qty, "REQUEST_SERVE", auth.userId, requestId)
+        );
+        stmts.push(env.DB.prepare("UPDATE products SET stock_current = MAX(stock_current - ?, 0) WHERE id = ?").bind(qty, it.product_id));
       }
       stmts.push(env.DB.prepare("UPDATE requests SET status='SERVED' WHERE id = ?").bind(requestId));
 
@@ -337,8 +402,9 @@ export default {
       if (!hasAnyRole(auth.role, ["ADMIN", "PERM_ORD"])) return bad("interdit", env, 403);
 
       const rows = await env.DB.prepare(
-        "SELECT id, name, unit, stock_current, stock_min, (stock_min*2 - stock_current) AS suggested_qty FROM products WHERE active=1 AND stock_current <= stock_min ORDER BY name"
+        "SELECT id, name, unit, stock_current, stock_min, image_url, supplier_url, (stock_min*2 - stock_current) AS suggested_qty FROM products WHERE active=1 AND stock_current <= stock_min ORDER BY name"
       ).all();
+
       return json({ reorder: rows.results }, env);
     }
 
