@@ -33,6 +33,10 @@
     /* Images */
     img.prod { width:48px; height:48px; object-fit:contain; border-radius:8px; border:1px solid #eee; background:#fff; }
     .prodCell { display:flex; gap:10px; align-items:center; }
+
+    /* ligne cliquable */
+    tr.clickable { cursor: pointer; }
+    tr.clickable:hover td { background:#eef2ff !important; }
   </style>
 </head>
 <body>
@@ -95,7 +99,12 @@
       qs("loginCard").classList.add("hidden");
       qs("appCard").classList.remove("hidden");
       qs("nav").classList.remove("hidden");
-      setHtml(qs("userbox"), '<span class="pill">'+esc(state.me.user.role)+'</span> <span class="muted">'+esc(state.me.user.email)+'</span> <button class="secondary" style="margin-left:8px" id="logoutBtn">Déconnexion</button>');
+      setHtml(
+        qs("userbox"),
+        '<span class="pill">'+esc(state.me.user.role)+'</span> '+
+        '<span class="muted">'+esc(state.me.user.email)+'</span> '+
+        '<button class="secondary" style="margin-left:8px" id="logoutBtn">Déconnexion</button>'
+      );
       qs("logoutBtn").onclick = () => { localStorage.removeItem("token"); state.token=""; location.reload(); };
     }
 
@@ -163,15 +172,25 @@
       return { cls: "pill-ok", row: "", label: "OK" };
     }
 
+    // ✅ Ouvrir fournisseur au clic sur la ligne
+    function openSupplier(p){
+      if (!p || !p.supplier_url) return;
+      window.open(p.supplier_url, "_blank", "noopener,noreferrer");
+    }
+
     function renderProducts(){
       const rows = state.products.map(p => {
         const t = stockTag(p);
         const img = p.image_url ? `<img class="prod" src="${esc(p.image_url)}" alt="img">` : ``;
-        const supplier = p.supplier_url
-          ? `<a href="${esc(p.supplier_url)}" target="_blank"><button class="secondary">Voir fournisseur</button></a>`
-          : `<span class="muted">—</span>`;
+
+        // ✅ La ligne entière devient cliquable si supplier_url existe
+        const clickableClass = p.supplier_url ? "clickable" : "";
+        const onclick = p.supplier_url ? `onclick="openSupplier(${encodeURIComponent(JSON.stringify(p)).replace(/%/g,'\\x25')})"` : "";
+
+        // ⚠️ On ne peut pas mettre directement l’objet JS dans onclick facilement sans soucis.
+        // Donc on utilise data-index (propre) :
         return `
-          <tr class="${t.row}">
+          <tr class="${t.row} ${p.supplier_url ? "clickable" : ""}" data-pid="${esc(p.id)}">
             <td>
               <div class="prodCell">
                 ${img}
@@ -185,7 +204,12 @@
             <td><span class="pill ${t.cls}">${esc(p.stock_current)} • ${t.label}</span></td>
             <td class="muted">${esc(p.stock_min)}</td>
             <td class="muted">${esc(p.location||"")}</td>
-            <td>${supplier}</td>
+            <td>
+              ${p.supplier_url
+                ? `<a href="${esc(p.supplier_url)}" target="_blank" rel="noopener noreferrer"><button class="secondary" data-supplier-btn="1">Voir fournisseur</button></a>`
+                : `<span class="muted">—</span>`
+              }
+            </td>
           </tr>
         `;
       }).join("");
@@ -233,12 +257,24 @@
 
         <div class="card">
           <b>Liste</b>
-          <table>
+          <table id="prodTable">
             <thead><tr><th>Produit</th><th>Unité</th><th>Stock</th><th>Min</th><th>Emplacement</th><th>Fournisseur</th></tr></thead>
             <tbody>${rows || `<tr><td colspan="6" class="muted">Aucun produit</td></tr>`}</tbody>
           </table>
         </div>
       `);
+
+      // ✅ Clic sur la ligne -> ouvre fournisseur (si existe)
+      // (et si tu cliques sur le bouton "Voir fournisseur", on laisse le lien faire son job)
+      document.querySelectorAll("#prodTable tbody tr").forEach(tr=>{
+        tr.addEventListener("click", (ev)=>{
+          const target = ev.target;
+          if (target && target.closest && target.closest("[data-supplier-btn]")) return; // bouton
+          const pid = tr.getAttribute("data-pid");
+          const p = state.products.find(x => String(x.id) === String(pid));
+          if (p && p.supplier_url) openSupplier(p);
+        });
+      });
 
       qs("refreshProd").onclick = async ()=> { await loadProducts(qs("searchProd").value.trim()); route(); };
       qs("searchProd").oninput = async (e)=> { await loadProducts(e.target.value.trim()); route(); };
