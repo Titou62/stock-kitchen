@@ -18,25 +18,32 @@
     table { width:100%; border-collapse:collapse; }
     th, td { padding:10px; border-bottom:1px solid #eee; text-align:left; font-size:14px; vertical-align: top; }
     .muted { color:#6b7280; font-size: 13px; }
-    .pill { display:inline-block; padding:4px 8px; border-radius:999px; background:#eef2ff; color:#3730a3; font-size:12px; }
+    .pill { display:inline-block; padding:4px 8px; border-radius:999px; font-size:12px; }
     nav a { color:#e5e7eb; text-decoration:none; margin-right:10px; font-size: 13px; }
     nav a:hover { text-decoration:underline; }
     .hidden { display:none; }
 
-    /* UX stock */
+    /* Stock badges (plus de fond rouge sur toute la ligne) */
     .pill-ok { background:#dcfce7; color:#166534; }
     .pill-warn { background:#ffedd5; color:#9a3412; }
     .pill-bad { background:#fee2e2; color:#991b1b; }
-    tr.low td { background:#fff7ed; }         /* proche min */
-    tr.critical td { background:#fef2f2; }    /* sous min */
 
     /* Images */
     img.prod { width:48px; height:48px; object-fit:contain; border-radius:8px; border:1px solid #eee; background:#fff; }
     .prodCell { display:flex; gap:10px; align-items:center; }
-
-    /* ligne cliquable */
     tr.clickable { cursor: pointer; }
-    tr.clickable:hover td { background:#eef2ff !important; }
+    tr.clickable:hover td { background: #f9fafb; }
+
+    /* Small icon button */
+    .iconBtn {
+      border: 1px solid #e5e7eb;
+      background: #fff;
+      color: #111827;
+      padding: 6px 10px;
+      border-radius: 10px;
+      cursor: pointer;
+    }
+    .iconBtn:hover { background:#f3f4f6; }
   </style>
 </head>
 <body>
@@ -95,14 +102,18 @@
       return data;
     }
 
+    function isAdmin(){
+      return String(state?.me?.user?.role || "") === "ADMIN";
+    }
+
     function setLoggedInUI(){
       qs("loginCard").classList.add("hidden");
       qs("appCard").classList.remove("hidden");
       qs("nav").classList.remove("hidden");
       setHtml(
         qs("userbox"),
-        '<span class="pill">'+esc(state.me.user.role)+'</span> '+
-        '<span class="muted">'+esc(state.me.user.email)+'</span> '+
+        '<span class="pill" style="background:#eef2ff;color:#3730a3">'+esc(state.me.user.role)+'</span> ' +
+        '<span class="muted">'+esc(state.me.user.email)+'</span> ' +
         '<button class="secondary" style="margin-left:8px" id="logoutBtn">Déconnexion</button>'
       );
       qs("logoutBtn").onclick = () => { localStorage.removeItem("token"); state.token=""; location.reload(); };
@@ -118,17 +129,14 @@
     async function loadMe(){
       state.me = await api("/api/me", { method:"GET" });
     }
-
     async function loadProducts(q=""){
       const data = await api("/api/products" + (q ? ("?q="+encodeURIComponent(q)) : ""), { method:"GET" });
       state.products = data.products || [];
     }
-
     async function loadRequests(status=""){
       const data = await api("/api/requests" + (status ? ("?status="+encodeURIComponent(status)) : ""), { method:"GET" });
       state.requests = data.requests || [];
     }
-
     async function loadReorder(){
       const data = await api("/api/reorder", { method:"GET" });
       state.reorder = data.reorder || [];
@@ -167,30 +175,30 @@
     function stockTag(p){
       const cur = Number(p.stock_current ?? 0);
       const min = Number(p.stock_min ?? 0);
-      if (cur <= min) return { cls: "pill-bad", row: "critical", label: "CRITIQUE" };
-      if (cur <= min * 1.5) return { cls: "pill-warn", row: "low", label: "BAS" };
-      return { cls: "pill-ok", row: "", label: "OK" };
-    }
-
-    // ✅ Ouvrir fournisseur au clic sur la ligne
-    function openSupplier(p){
-      if (!p || !p.supplier_url) return;
-      window.open(p.supplier_url, "_blank", "noopener,noreferrer");
+      if (cur <= min) return { cls: "pill-bad", label: "CRITIQUE" };
+      if (cur <= min * 1.5) return { cls: "pill-warn", label: "BAS" };
+      return { cls: "pill-ok", label: "OK" };
     }
 
     function renderProducts(){
+      const showAdminDelete = isAdmin();
+
       const rows = state.products.map(p => {
         const t = stockTag(p);
         const img = p.image_url ? `<img class="prod" src="${esc(p.image_url)}" alt="img">` : ``;
 
-        // ✅ La ligne entière devient cliquable si supplier_url existe
-        const clickableClass = p.supplier_url ? "clickable" : "";
-        const onclick = p.supplier_url ? `onclick="openSupplier(${encodeURIComponent(JSON.stringify(p)).replace(/%/g,'\\x25')})"` : "";
+        const supplierCell = p.supplier_url
+          ? `<span class="muted">Cliquer sur la ligne</span>`
+          : `<span class="muted">—</span>`;
 
-        // ⚠️ On ne peut pas mettre directement l’objet JS dans onclick facilement sans soucis.
-        // Donc on utilise data-index (propre) :
+        const delBtn = showAdminDelete
+          ? `<button class="iconBtn" title="Supprimer (soft)" data-del="${p.id}">❌</button>`
+          : ``;
+
+        const trClass = p.supplier_url ? "clickable" : "";
+
         return `
-          <tr class="${t.row} ${p.supplier_url ? "clickable" : ""}" data-pid="${esc(p.id)}">
+          <tr class="${trClass}" data-supplier="${esc(p.supplier_url || "")}">
             <td>
               <div class="prodCell">
                 ${img}
@@ -204,12 +212,8 @@
             <td><span class="pill ${t.cls}">${esc(p.stock_current)} • ${t.label}</span></td>
             <td class="muted">${esc(p.stock_min)}</td>
             <td class="muted">${esc(p.location||"")}</td>
-            <td>
-              ${p.supplier_url
-                ? `<a href="${esc(p.supplier_url)}" target="_blank" rel="noopener noreferrer"><button class="secondary" data-supplier-btn="1">Voir fournisseur</button></a>`
-                : `<span class="muted">—</span>`
-              }
-            </td>
+            <td>${supplierCell}</td>
+            ${showAdminDelete ? `<td style="width:1%;white-space:nowrap;text-align:right">${delBtn}</td>` : ``}
           </tr>
         `;
       }).join("");
@@ -224,20 +228,29 @@
 
         <div class="card">
           <b>Ajouter un produit (rapide : copier/coller Adelya)</b>
+
           <div class="row" style="margin-top:10px">
             <input id="pName" placeholder="Nom" style="min-width:220px" />
             <input id="pCat" placeholder="Catégorie" style="min-width:180px" />
             <input id="pUnit" placeholder="Unité (pcs, L...)" style="min-width:160px" />
             <input id="pMin" type="number" step="0.1" placeholder="Stock min" style="min-width:120px" />
             <input id="pLoc" placeholder="Emplacement" style="min-width:180px" />
-            <input id="pImg" placeholder="URL image (Adelya)" style="min-width:260px" />
-            <input id="pSupplier" placeholder="Lien produit fournisseur (Adelya)" style="min-width:260px" />
+          </div>
+
+          <div class="row" style="margin-top:10px">
+            <input id="pSupplier" placeholder="Lien produit fournisseur (Adelya)" style="min-width:420px" />
+            <button id="btnImport" class="secondary">Importer depuis Adelya</button>
+          </div>
+
+          <div class="row" style="margin-top:10px">
+            <input id="pImg" placeholder="URL image (Adelya)" style="min-width:420px" />
             <button id="addProd">Ajouter</button>
           </div>
+
           <div class="muted" id="prodMsg" style="margin-top:8px"></div>
           <div class="muted" style="margin-top:8px">
-            Astuce : sur Adelya → clic droit image → “Copier l’adresse de l’image” (pour URL image).  
-            Et copie l’URL de la page produit pour “Lien fournisseur”.
+            Astuce : sur Adelya → clic droit image → “Copier l’adresse de l’image” (URL image).
+            Et copie l’URL de la page produit (Lien fournisseur).
           </div>
         </div>
 
@@ -257,28 +270,45 @@
 
         <div class="card">
           <b>Liste</b>
-          <table id="prodTable">
-            <thead><tr><th>Produit</th><th>Unité</th><th>Stock</th><th>Min</th><th>Emplacement</th><th>Fournisseur</th></tr></thead>
-            <tbody>${rows || `<tr><td colspan="6" class="muted">Aucun produit</td></tr>`}</tbody>
+          <table>
+            <thead>
+              <tr>
+                <th>Produit</th><th>Unité</th><th>Stock</th><th>Min</th><th>Emplacement</th><th>Fournisseur</th>
+                ${showAdminDelete ? `<th style="text-align:right">ADMIN</th>` : ``}
+              </tr>
+            </thead>
+            <tbody>${rows || `<tr><td colspan="${showAdminDelete ? 7 : 6}" class="muted">Aucun produit</td></tr>`}</tbody>
           </table>
+          ${showAdminDelete ? `<div class="muted" style="margin-top:8px">❌ visible seulement pour ADMIN</div>` : ``}
         </div>
       `);
 
-      // ✅ Clic sur la ligne -> ouvre fournisseur (si existe)
-      // (et si tu cliques sur le bouton "Voir fournisseur", on laisse le lien faire son job)
-      document.querySelectorAll("#prodTable tbody tr").forEach(tr=>{
-        tr.addEventListener("click", (ev)=>{
-          const target = ev.target;
-          if (target && target.closest && target.closest("[data-supplier-btn]")) return; // bouton
-          const pid = tr.getAttribute("data-pid");
-          const p = state.products.find(x => String(x.id) === String(pid));
-          if (p && p.supplier_url) openSupplier(p);
-        });
-      });
-
+      // Search
       qs("refreshProd").onclick = async ()=> { await loadProducts(qs("searchProd").value.trim()); route(); };
       qs("searchProd").oninput = async (e)=> { await loadProducts(e.target.value.trim()); route(); };
 
+      // Import Adelya
+      qs("btnImport").onclick = async ()=>{
+        try{
+          setHtml(qs("prodMsg"), "Import en cours…");
+          const u = qs("pSupplier").value.trim();
+          if (!u) throw new Error("Colle d'abord le lien produit Adelya dans “Lien produit fournisseur”");
+          const data = await api("/api/adelya/import?url=" + encodeURIComponent(u), { method:"GET" });
+
+          // Fill fields
+          qs("pName").value = data.name || "";
+          qs("pCat").value = data.category || "";
+          qs("pUnit").value = data.unit || "pcs";
+          qs("pImg").value = data.image_url || "";
+          qs("pSupplier").value = data.supplier_url || u;
+
+          setHtml(qs("prodMsg"), "✅ Import OK (vérifie et clique Ajouter)");
+        }catch(err){
+          setHtml(qs("prodMsg"), "❌ " + esc(err.message));
+        }
+      };
+
+      // Add product
       qs("addProd").onclick = async ()=>{
         try{
           const payload = {
@@ -297,9 +327,9 @@
         }catch(err){ setHtml(qs("prodMsg"), "❌ " + esc(err.message)); }
       };
 
+      // Stock moves
       qs("btnIn").onclick = async ()=> doMove("in");
       qs("btnOut").onclick = async ()=> doMove("out");
-
       async function doMove(kind){
         try{
           const payload = {
@@ -313,13 +343,46 @@
           route();
         }catch(err){ setHtml(qs("movMsg"), "❌ " + esc(err.message)); }
       }
+
+      // Row click => open supplier link
+      document.querySelectorAll("tr[data-supplier]").forEach(tr=>{
+        tr.addEventListener("click", (ev)=>{
+          // if click was on delete button => ignore, handled below
+          const target = ev.target;
+          if (target && target.closest && target.closest("button[data-del]")) return;
+
+          const link = tr.getAttribute("data-supplier") || "";
+          if (link) window.open(link, "_blank", "noopener,noreferrer");
+        });
+      });
+
+      // Admin delete
+      document.querySelectorAll("button[data-del]").forEach(btn=>{
+        btn.addEventListener("click", async (ev)=>{
+          ev.preventDefault();
+          ev.stopPropagation();
+
+          const id = btn.getAttribute("data-del");
+          if (!id) return;
+
+          if (!confirm("Supprimer ce produit ? (Il sera juste caché)")) return;
+
+          try{
+            await api("/api/products/" + id, { method:"DELETE" });
+            await loadProducts();
+            route();
+          }catch(err){
+            alert("Erreur: " + err.message);
+          }
+        });
+      });
     }
 
     function renderRequests(){
       const rows = state.requests.map(r => `
         <tr>
           <td>#${esc(r.id)}</td>
-          <td><span class="pill">${esc(r.status)}</span></td>
+          <td><span class="pill" style="background:#eef2ff;color:#3730a3">${esc(r.status)}</span></td>
           <td class="muted">${esc(r.note||"")}</td>
           <td class="muted">${esc(r.created_at)}</td>
           <td><button class="secondary" data-id="${r.id}">Servir</button></td>
@@ -344,7 +407,6 @@
             <button id="createReq">Créer</button>
           </div>
           <div class="muted" id="reqMsg" style="margin-top:8px"></div>
-          <div class="muted" style="margin-top:8px">Pour le flux réel “Garde cuisine”, utilise la page QR (menu QR Demande).</div>
         </div>
 
         <div class="card">
@@ -353,7 +415,6 @@
             <thead><tr><th>ID</th><th>Statut</th><th>Note</th><th>Créée</th><th>Action</th></tr></thead>
             <tbody>${rows || `<tr><td colspan="5" class="muted">Aucune demande</td></tr>`}</tbody>
           </table>
-          <div class="muted" style="margin-top:8px">Note: Ce MVP “serve” directement (il sort le stock). L'écran d'“approbation détaillée” peut être ajouté ensuite.</div>
         </div>
       `);
 
@@ -428,7 +489,7 @@
         <h2 style="margin:0 0 10px 0">QR Demande (Garde cuisine)</h2>
         <div class="card">
           <b>Créer un token QR</b>
-          <p class="muted">Pour ce MVP, la création du token se fait via la base D1 (commande dans README). Ensuite, tu mets le token ci-dessous pour obtenir l'URL à convertir en QR code.</p>
+          <p class="muted">Pour ce MVP, la création du token se fait via la base D1 (commande dans README).</p>
           <div class="row">
             <input id="qrToken" placeholder="Colle ici le token (ex: abcd...)" style="min-width:320px" />
             <button id="makeQrUrl">Générer l'URL</button>
@@ -438,7 +499,6 @@
             <div id="qrUrl" style="word-break:break-all"></div>
           </div>
         </div>
-
         <div class="card">
           <b>Page demande rapide (mobile)</b>
           <p class="muted">Tu peux ouvrir: <code>/qr.html?token=TON_TOKEN</code></p>
@@ -448,8 +508,8 @@
 
       qs("makeQrUrl").onclick = ()=>{
         const t = qs("qrToken").value.trim();
-        const url = location.origin + "/qr.html?token=" + encodeURIComponent(t);
-        setHtml(qs("qrUrl"), "<b>"+esc(url)+"</b>");
+        const u = location.origin + "/qr.html?token=" + encodeURIComponent(t);
+        setHtml(qs("qrUrl"), "<b>"+esc(u)+"</b>");
       };
     }
 
@@ -472,12 +532,15 @@
     qs("loginBtn").onclick = async ()=>{
       try{
         setHtml(qs("loginMsg"), "Connexion...");
-        const data = await api("/api/auth/login", { method:"POST", body: JSON.stringify({ email: qs("email").value, password: qs("password").value }) });
+        const data = await api("/api/auth/login", {
+          method:"POST",
+          body: JSON.stringify({ email: qs("email").value, password: qs("password").value })
+        });
         state.token = data.token;
         localStorage.setItem("token", state.token);
         await boot();
       }catch(e){
-        setHtml(qs("loginMsg"), "❌ " + esc(e.message) + "<br><span class='muted'>Vérifie API_BASE dans web/config.js et que l'admin existe.</span>");
+        setHtml(qs("loginMsg"), "❌ " + esc(e.message));
       }
     };
 
